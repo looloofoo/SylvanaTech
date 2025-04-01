@@ -1,0 +1,695 @@
+# Hybrid Approach: Unity + Python for Plant Health Monitoring
+
+## System Architecture Overview
+
+```
+┌───────────────────┐    ┌────────────────────┐
+│                   │    │                    │
+│  Python Backend   │◄───┤  Unity AR App      │
+│  (Model Training) │    │  (Meta Quest)      │
+│                   │    │                    │
+└───────┬───────────┘    └────────┬───────────┘
+        │                         │
+        ▼                         ▼
+┌───────────────────┐    ┌────────────────────┐
+│                   │    │                    │
+│  Exported Models  │───►│  Inference Engine  │
+│  (ONNX Format)    │    │  (In Unity)        │
+│                   │    │                    │
+└───────────────────┘    └────────────────────┘
+```
+
+## 1. Python Component (Model Training)
+
+### Development Environment Setup
+```python
+# Required libraries
+pip install tensorflow numpy opencv-python scikit-learn onnx tf2onnx pandas matplotlib
+
+# For dataset management
+pip install pillow imgaug
+```
+
+### Data Collection & Preparation
+```python
+import os
+import numpy as np
+import cv2
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from imgaug import augmenters as iaa
+
+def load_plant_dataset(dataset_path):
+    """
+    Load and prepare plant images dataset
+    Structure:
+    - dataset_path/
+      - healthy/
+        - plant1_healthy.jpg
+        - plant2_healthy.jpg
+      - overwatered/
+        - plant1_overwatered.jpg
+      - underwatered/
+        - plant1_underwatered.jpg
+      ...
+    """
+    categories = os.listdir(dataset_path)
+    X = []  # Images
+    y = []  # Labels
+    
+    for idx, category in enumerate(categories):
+        category_path = os.path.join(dataset_path, category)
+        for img_name in os.listdir(category_path):
+            img_path = os.path.join(category_path, img_name)
+            img = cv2.imread(img_path)
+            img = cv2.resize(img, (224, 224))  # Resize for model consistency
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert to RGB
+            X.append(img)
+            y.append(idx)
+    
+    return np.array(X), np.array(y)
+
+# Load dataset
+X, y = load_plant_dataset("plant_health_dataset")
+
+# Split into training and validation sets
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Data augmentation for training
+augmenter = iaa.Sequential([
+    iaa.Fliplr(0.5),  # Horizontal flips
+    iaa.Rotate((-20, 20)),  # Rotation
+    iaa.Multiply((0.8, 1.2)),  # Brightness changes
+    iaa.GaussianBlur(sigma=(0, 0.5))  # Slight blur for robustness
+])
+
+# Normalize pixel values
+X_train = X_train.astype('float32') / 255.0
+X_val = X_val.astype('float32') / 255.0
+```
+
+### Plant Classification Model
+```python
+from tensorflow.keras import layers, models
+
+def create_plant_classification_model(num_classes):
+    """Create model to identify plant species"""
+    # Use a pre-trained model as the base
+    base_model = tf.keras.applications.MobileNetV2(
+        input_shape=(224, 224, 3),
+        include_top=False,
+        weights='imagenet'
+    )
+    
+    # Freeze the base model
+    base_model.trainable = False
+    
+    # Add custom classification head
+    model = models.Sequential([
+        base_model,
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(128, activation='relu'),
+        layers.Dropout(0.2),
+        layers.Dense(num_classes, activation='softmax')
+    ])
+    
+    return model
+
+# Create and train the model
+plant_model = create_plant_classification_model(len(np.unique(y)))
+plant_model.compile(
+    optimizer='adam',
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Train the model
+history = plant_model.fit(
+    X_train, y_train,
+    epochs=20,
+    validation_data=(X_val, y_val),
+    batch_size=32
+)
+
+# Save the model
+plant_model.save("plant_classification_model.h5")
+```
+
+### Plant Health Analysis Model
+```python
+def create_health_analysis_model():
+    """Create model to analyze health features from plant images"""
+    # Use a pre-trained model but with custom output for health metrics
+    base_model = tf.keras.applications.MobileNetV2(
+        input_shape=(224, 224, 3),
+        include_top=False,
+        weights='imagenet'
+    )
+    
+    # We'll fine-tune the top layers
+    base_model.trainable = False
+    
+    # Multiple outputs for different health indicators
+    inputs = tf.keras.Input(shape=(224, 224, 3))
+    x = base_model(inputs, training=False)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dense(256, activation='relu')(x)
+    
+    # Health indicators as separate outputs
+    water_status = layers.Dense(3, activation='softmax', name='water_status')(x)  # [underwatered, optimal, overwatered]
+    light_status = layers.Dense(3, activation='softmax', name='light_status')(x)  # [too_little, optimal, too_much]
+    nutrient_status = layers.Dense(2, activation='softmax', name='nutrient_status')(x)  # [deficient, sufficient]
+    
+    # Create model with multiple outputs
+    health_model = tf.keras.Model(
+        inputs=inputs,
+        outputs=[water_status, light_status, nutrient_status]
+    )
+    
+    return health_model
+
+# Create and train the health model
+# Note: You would need labeled data for each health indicator
+health_model = create_health_analysis_model()
+health_model.compile(
+    optimizer='adam',
+    loss={
+        'water_status': 'categorical_crossentropy',
+        'light_status': 'categorical_crossentropy',
+        'nutrient_status': 'categorical_crossentropy'
+    },
+    metrics=['accuracy']
+)
+
+# Health model would need proper labeled data for each output
+# This is simplified for the example
+
+# Save the health model
+health_model.save("plant_health_model.h5")
+```
+
+### Export Models to ONNX
+```python
+import tf2onnx
+
+# Convert plant classification model to ONNX
+plant_model = tf.keras.models.load_model("plant_classification_model.h5")
+tf2onnx.convert.from_keras(
+    plant_model, 
+    output_path="plant_classification_model.onnx"
+)
+
+# Convert health analysis model to ONNX
+health_model = tf.keras.models.load_model("plant_health_model.h5")
+tf2onnx.convert.from_keras(
+    health_model, 
+    output_path="plant_health_model.onnx"
+)
+
+print("Models converted to ONNX format!")
+```
+
+## 2. Unity Component (AR Application)
+
+### Project Setup
+1. Create a new Unity project with the following setup:
+   - Unity version: 2022.3 LTS or newer
+   - Template: 3D Core
+   - Platform: Android
+
+2. Install required packages:
+   - XR Plugin Management
+   - Oculus XR Plugin
+   - AR Foundation
+   - Barracuda (Neural Network inference)
+
+### C# Scripts
+
+#### 1. PassthroughManager.cs
+```csharp
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.XR;
+using Unity.Barracuda;
+
+public class PassthroughManager : MonoBehaviour
+{
+    [SerializeField] private NNModel plantClassificationModelAsset;
+    [SerializeField] private NNModel plantHealthModelAsset;
+    
+    private Model plantClassificationModel;
+    private Model plantHealthModel;
+    private IWorker plantClassificationWorker;
+    private IWorker plantHealthWorker;
+    
+    [SerializeField] private Material passthrough;
+    [SerializeField] private GameObject infoPanel;
+    
+    private Texture2D cameraTexture;
+    private bool isScanning = false;
+    
+    private Dictionary<int, string> plantClasses = new Dictionary<int, string>()
+    {
+        {0, "Pothos"},
+        {1, "Snake Plant"},
+        {2, "Monstera"},
+        {3, "Peace Lily"},
+        // Add more plants as needed
+    };
+    
+    private Dictionary<string, PlantInfo> plantDatabase = new Dictionary<string, PlantInfo>();
+    
+    void Start()
+    {
+        // Initialize neural network models
+        plantClassificationModel = ModelLoader.Load(plantClassificationModelAsset);
+        plantHealthModel = ModelLoader.Load(plantHealthModelAsset);
+        
+        plantClassificationWorker = WorkerFactory.CreateWorker(
+            WorkerFactory.Type.ComputePrecompiled, 
+            plantClassificationModel
+        );
+        
+        plantHealthWorker = WorkerFactory.CreateWorker(
+            WorkerFactory.Type.ComputePrecompiled, 
+            plantHealthModel
+        );
+        
+        // Set up camera texture
+        cameraTexture = new Texture2D(224, 224, TextureFormat.RGB24, false);
+        
+        // Initialize plant database
+        InitializePlantDatabase();
+        
+        // Hide info panel initially
+        infoPanel.SetActive(false);
+    }
+    
+    void Update()
+    {
+        // Check for controller input
+        if (OVRInput.GetDown(OVRInput.Button.One))
+        {
+            isScanning = true;
+            StartCoroutine(CaptureAndAnalyze());
+        }
+    }
+    
+    private IEnumerator CaptureAndAnalyze()
+    {
+        // Capture frame from passthrough camera
+        // Note: This is conceptual, as direct access to the passthrough camera
+        // feed requires using Oculus's specific APIs
+        
+        // In a real implementation, you would use OVRCameraRig and access the camera texture
+        // This example uses a placeholder for simplicity
+        
+        // For illustrative purposes, let's say we can access the image:
+        Texture2D cameraImage = CapturePassthroughImage(224, 224);
+        
+        // Process image and run through models
+        var plantType = IdentifyPlant(cameraImage);
+        var healthStatus = AnalyzePlantHealth(cameraImage);
+        
+        // Display results
+        DisplayPlantInfo(plantType, healthStatus);
+        
+        isScanning = false;
+        yield return null;
+    }
+    
+    private Texture2D CapturePassthroughImage(int width, int height)
+    {
+        // This function is a placeholder
+        // In reality, you would need to use Oculus-specific APIs to capture
+        // an image from the passthrough cameras
+        
+        // Placeholder logic - in a real implementation this would access the actual camera feed
+        Texture2D texture = new Texture2D(width, height, TextureFormat.RGB24, false);
+        
+        // Placeholder image data
+        Color[] colors = new Color[width * height];
+        for (int i = 0; i < colors.Length; i++)
+        {
+            colors[i] = Color.green; // Placeholder - would be actual camera data
+        }
+        
+        texture.SetPixels(colors);
+        texture.Apply();
+        
+        return texture;
+    }
+    
+    private string IdentifyPlant(Texture2D image)
+    {
+        // Convert texture to tensor
+        Tensor inputTensor = new Tensor(image, 3);
+        
+        // Run inference
+        plantClassificationWorker.Execute(inputTensor);
+        Tensor outputTensor = plantClassificationWorker.PeekOutput();
+        
+        // Get highest probability class
+        float[] probabilities = outputTensor.AsFloats();
+        int classIndex = 0;
+        float maxProb = 0;
+        
+        for (int i = 0; i < probabilities.Length; i++)
+        {
+            if (probabilities[i] > maxProb)
+            {
+                maxProb = probabilities[i];
+                classIndex = i;
+            }
+        }
+        
+        // Dispose tensors
+        inputTensor.Dispose();
+        outputTensor.Dispose();
+        
+        // Return plant type
+        return plantClasses.ContainsKey(classIndex) ? plantClasses[classIndex] : "Unknown Plant";
+    }
+    
+    private PlantHealthStatus AnalyzePlantHealth(Texture2D image)
+    {
+        // Similar to above, but using the health model
+        Tensor inputTensor = new Tensor(image, 3);
+        
+        // Run inference
+        plantHealthWorker.Execute(inputTensor);
+        
+        // Get outputs for each health indicator
+        // This assumes the model has named outputs as specified in the Python model
+        Tensor waterStatusTensor = plantHealthWorker.PeekOutput("water_status");
+        Tensor lightStatusTensor = plantHealthWorker.PeekOutput("light_status");
+        Tensor nutrientStatusTensor = plantHealthWorker.PeekOutput("nutrient_status");
+        
+        // Process water status
+        float[] waterProbs = waterStatusTensor.AsFloats();
+        WaterStatus waterStatus = GetMaxIndex(waterProbs) == 0 ? WaterStatus.Underwatered :
+                                  GetMaxIndex(waterProbs) == 1 ? WaterStatus.Optimal :
+                                                                WaterStatus.Overwatered;
+        
+        // Process light status
+        float[] lightProbs = lightStatusTensor.AsFloats();
+        LightStatus lightStatus = GetMaxIndex(lightProbs) == 0 ? LightStatus.TooLittle :
+                                  GetMaxIndex(lightProbs) == 1 ? LightStatus.Optimal :
+                                                               LightStatus.TooMuch;
+        
+        // Process nutrient status
+        float[] nutrientProbs = nutrientStatusTensor.AsFloats();
+        NutrientStatus nutrientStatus = GetMaxIndex(nutrientProbs) == 0 ? NutrientStatus.Deficient :
+                                                                         NutrientStatus.Sufficient;
+        
+        // Dispose tensors
+        inputTensor.Dispose();
+        waterStatusTensor.Dispose();
+        lightStatusTensor.Dispose();
+        nutrientStatusTensor.Dispose();
+        
+        // Create health status object
+        return new PlantHealthStatus
+        {
+            WaterStatus = waterStatus,
+            LightStatus = lightStatus,
+            NutrientStatus = nutrientStatus,
+            OverallHealth = CalculateOverallHealth(waterStatus, lightStatus, nutrientStatus)
+        };
+    }
+    
+    private int GetMaxIndex(float[] array)
+    {
+        int maxIndex = 0;
+        float maxValue = array[0];
+        
+        for (int i = 1; i < array.Length; i++)
+        {
+            if (array[i] > maxValue)
+            {
+                maxValue = array[i];
+                maxIndex = i;
+            }
+        }
+        
+        return maxIndex;
+    }
+    
+    private float CalculateOverallHealth(WaterStatus water, LightStatus light, NutrientStatus nutrients)
+    {
+        // Simple algorithm to calculate overall health as percentage
+        float score = 0f;
+        
+        // Water contributes 40%
+        score += water == WaterStatus.Optimal ? 0.4f : 0.2f;
+        
+        // Light contributes 30%
+        score += light == LightStatus.Optimal ? 0.3f : 0.15f;
+        
+        // Nutrients contribute 30%
+        score += nutrients == NutrientStatus.Sufficient ? 0.3f : 0.15f;
+        
+        return score * 100f;
+    }
+    
+    private void DisplayPlantInfo(string plantType, PlantHealthStatus healthStatus)
+    {
+        // Get reference to UI manager and update the interface
+        var uiManager = FindObjectOfType<PlantUIManager>();
+        if (uiManager != null)
+        {
+            uiManager.UpdatePlantInfoUI(plantType, healthStatus, plantDatabase.ContainsKey(plantType) ? plantDatabase[plantType] : null);
+        }
+        
+        // Show info panel
+        infoPanel.SetActive(true);
+    }
+    
+    private void InitializePlantDatabase()
+    {
+        // Populate plant database with care information
+        plantDatabase.Add("Pothos", new PlantInfo
+        {
+            WaterFrequency = "7-10 days",
+            IdealLight = "Medium indirect light",
+            Humidity = "Average indoor humidity",
+            CommonIssues = new string[] 
+            { 
+                "Yellowing leaves (overwatering)", 
+                "Brown leaf tips (low humidity)", 
+                "Leggy growth (insufficient light)" 
+            }
+        });
+        
+        plantDatabase.Add("Snake Plant", new PlantInfo
+        {
+            WaterFrequency = "2-3 weeks",
+            IdealLight = "Low to bright indirect light",
+            Humidity = "Average to dry",
+            CommonIssues = new string[] 
+            { 
+                "Soft, mushy leaves (overwatering)", 
+                "Brown edges (underwatering)", 
+                "Wrinkled leaves (underwatering)" 
+            }
+        });
+        
+        // Add more plants as needed
+    }
+    
+    void OnDestroy()
+    {
+        // Clean up resources
+        plantClassificationWorker?.Dispose();
+        plantHealthWorker?.Dispose();
+    }
+}
+
+// Supporting classes
+public enum WaterStatus { Underwatered, Optimal, Overwatered }
+public enum LightStatus { TooLittle, Optimal, TooMuch }
+public enum NutrientStatus { Deficient, Sufficient }
+
+public class PlantHealthStatus
+{
+    public WaterStatus WaterStatus { get; set; }
+    public LightStatus LightStatus { get; set; }
+    public NutrientStatus NutrientStatus { get; set; }
+    public float OverallHealth { get; set; } // 0-100%
+}
+
+public class PlantInfo
+{
+    public string WaterFrequency { get; set; }
+    public string IdealLight { get; set; }
+    public string Humidity { get; set; }
+    public string[] CommonIssues { get; set; }
+}
+```
+
+#### 2. PlantUIManager.cs
+```csharp
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using TMPro;
+
+public class PlantUIManager : MonoBehaviour
+{
+    [SerializeField] private GameObject infoPanel;
+    [SerializeField] private TextMeshProUGUI plantNameText;
+    [SerializeField] private Slider healthMeter;
+    [SerializeField] private Image healthMeterFill;
+    [SerializeField] private TextMeshProUGUI waterStatusText;
+    [SerializeField] private TextMeshProUGUI lightStatusText;
+    [SerializeField] private TextMeshProUGUI nutrientStatusText;
+    [SerializeField] private TextMeshProUGUI careInstructionsText;
+    [SerializeField] private TextMeshProUGUI commonIssuesText;
+    
+    // Color gradients for health meter
+    [SerializeField] private Color lowHealthColor = Color.red;
+    [SerializeField] private Color mediumHealthColor = Color.yellow;
+    [SerializeField] private Color highHealthColor = Color.green;
+    
+    public void UpdatePlantInfoUI(string plantType, PlantHealthStatus healthStatus, PlantInfo plantInfo)
+    {
+        // Update plant name
+        plantNameText.text = plantType;
+        
+        // Update health meter
+        healthMeter.value = healthStatus.OverallHealth / 100f;
+        healthMeterFill.color = GetHealthColor(healthStatus.OverallHealth);
+        
+        // Update status texts
+        UpdateWaterStatus(healthStatus.WaterStatus);
+        UpdateLightStatus(healthStatus.LightStatus);
+        UpdateNutrientStatus(healthStatus.NutrientStatus);
+        
+        // Update care instructions if plant info is available
+        if (plantInfo != null)
+        {
+            careInstructionsText.text = $"Water: {plantInfo.WaterFrequency}\n" +
+                                       $"Light: {plantInfo.IdealLight}\n" +
+                                       $"Humidity: {plantInfo.Humidity}";
+            
+            // Update common issues
+            commonIssuesText.text = string.Join("\n", plantInfo.CommonIssues);
+        }
+        else
+        {
+            careInstructionsText.text = "Plant information not available.";
+            commonIssuesText.text = "";
+        }
+    }
+    
+    private void UpdateWaterStatus(WaterStatus status)
+    {
+        switch (status)
+        {
+            case WaterStatus.Underwatered:
+                waterStatusText.text = "Water: Needs water";
+                waterStatusText.color = Color.red;
+                break;
+            case WaterStatus.Optimal:
+                waterStatusText.text = "Water: Good";
+                waterStatusText.color = Color.green;
+                break;
+            case WaterStatus.Overwatered:
+                waterStatusText.text = "Water: Overwatered";
+                waterStatusText.color = Color.red;
+                break;
+        }
+    }
+    
+    private void UpdateLightStatus(LightStatus status)
+    {
+        switch (status)
+        {
+            case LightStatus.TooLittle:
+                lightStatusText.text = "Light: Needs more light";
+                lightStatusText.color = Color.yellow;
+                break;
+            case LightStatus.Optimal:
+                lightStatusText.text = "Light: Good";
+                lightStatusText.color = Color.green;
+                break;
+            case LightStatus.TooMuch:
+                lightStatusText.text = "Light: Too much light";
+                lightStatusText.color = Color.yellow;
+                break;
+        }
+    }
+    
+    private void UpdateNutrientStatus(NutrientStatus status)
+    {
+        switch (status)
+        {
+            case NutrientStatus.Deficient:
+                nutrientStatusText.text = "Nutrients: Needs fertilizer";
+                nutrientStatusText.color = Color.yellow;
+                break;
+            case NutrientStatus.Sufficient:
+                nutrientStatusText.text = "Nutrients: Good";
+                nutrientStatusText.color = Color.green;
+                break;
+        }
+    }
+    
+    private Color GetHealthColor(float health)
+    {
+        if (health < 40f)
+            return lowHealthColor;
+        else if (health < 70f)
+            return mediumHealthColor;
+        else
+            return highHealthColor;
+    }
+}
+```
+
+## 3. Development Workflow
+
+### Phase 1: Data Collection and Model Training (Python)
+1. Collect plant images showing:
+   - Different plant species
+   - Various health conditions
+   - Different lighting conditions
+2. Label and organize the data
+3. Train the classification and health analysis models
+4. Export models to ONNX format
+
+### Phase 2: Meta Quest App Development (Unity)
+1. Set up the Unity project with required packages
+2. Import ONNX models
+3. Implement passthrough camera access
+4. Develop the neural network inference system
+5. Create the AR UI for displaying plant information
+6. Implement hand tracking for plant selection
+
+### Phase 3: Testing and Refinement
+1. Test with a variety of plants in different conditions
+2. Refine models based on real-world performance
+3. Optimize for performance on the Meta Quest hardware
+
+## 4. Deployment
+
+1. Build the Unity project for Android
+2. Install on Meta Quest using Developer Mode
+3. Package as an application for distribution (optional)
+
+## 5. Limitations and Considerations
+
+- **Passthrough Quality**: Meta Quest passthrough cameras have limited resolution and color accuracy which may affect plant analysis quality
+- **Lighting Sensitivity**: Results will vary based on environmental lighting
+- **Model Accuracy**: Limited to plants it was trained on
+- **Performance**: Neural network inference on mobile hardware has performance limitations
+- **Battery Usage**: Continuous use of cameras and neural networks will drain battery quickly
+
+## 6. Future Improvements
+
+- **Online Database**: Connect to an online database of plants and conditions
+- **Tracking Over Time**: Record plant health over time to show trends
+- **Environmental Sensors**: Integrate with external sensors for soil moisture, temperature, etc.
+- **Custom Training**: Allow users to train the system on their specific plants
