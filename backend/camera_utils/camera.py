@@ -27,7 +27,7 @@ class CameraManager:
         if not self.camera.isOpened():
             raise RuntimeError("Failed to open camera. Check if it isn't connected and not in use by another app.")
  
-        return self.camera.isOpened():
+        return self.camera.isOpened()
 
     def capture_frame(self):
         """
