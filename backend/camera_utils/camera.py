@@ -83,21 +83,20 @@ class CameraManager:
             self.camera.release()
             self.camera = None
 
-def list_available_cameras(max_cameras=10):
-    """
-    Creating this since it could be useful in the future if more cameras are added to the rig.
-    """
-    available_cameras = {}
+    def list_available_cameras(max_cameras=10):
+        """
+        Creating this since it could be useful in the future if more cameras are added to the rig.
+        """
+        available_cameras = {}
 
-    for camera_id in range(max_cameras):
-        camera = cv2.VideoCapture(camera_id)
-        if camera.isOpened():
-            ret, _ = camera.read()
-            if ret:
-                width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-                heigth = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                available_cameras[camera_id] = (width, heigth)
-            camera.release()
-        
-    return available_cameras         
-
+        for camera_id in range(max_cameras):
+            camera = cv2.VideoCapture(camera_id)
+            if camera.isOpened():
+                ret, _ = camera.read()
+                if ret:
+                    width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    heigth = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    available_cameras[camera_id] = (width, heigth)
+                camera.release()
+            
+        return available_cameras         
